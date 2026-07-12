@@ -1,0 +1,17 @@
+EXECUTIVE SUMMARY - H1 2026 BUDGET VS. ACTUALS
+=======================================================
+
+Total H1 operating expenses were $3,234,332 against a budget of $3,150,000, a variance of $84,332 (+2.7%).
+Revenue finished $116,848 ahead of plan.
+
+Material variance items flagged: 10 (threshold: 10% and $3,000)
+
+Top unfavorable drivers:
+  - Marketing / Advertising (2026-06): $12,400 over budget (+31.0%)
+  - Operations / Contractors (2026-05): $11,250 over budget (+75.0%)
+  - Marketing / Advertising (2026-05): $10,000 over budget (+25.0%)
+
+Recommended follow-ups:
+  - Review spend controls for the departments flagged above.
+  - Confirm whether overruns are timing differences or true run-rate increases.
+  - Reforecast H2 using the monthly trend in variance_charts.png.
