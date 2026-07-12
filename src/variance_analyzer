@@ -1,0 +1,419 @@
+Reads a budget file and an actuals file (CSV exports like the ones that come
+
+out of an ERP such as NetSuite), calculates budget-vs-actuals variances,
+
+flags material items, and produces three deliverables in the output folder:
+
+1. variance_report.xlsx  - a formatted, multi-tab Excel report
+
+2. variance_charts.png   - budget vs. actual charts by department and month
+
+3. executive_summary.txt - auto-generated commentary on the biggest drivers
+
+Run it from the project root folder with:  python src/variance_analyzer.py
+
+"""
+
+import os
+
+import pandas as pd
+
+import matplotlib
+
+matplotlib.use("Agg")  # lets charts save to a file on machines with no screen
+
+import matplotlib.pyplot as plt
+
+from openpyxl.styles import Alignment, Font, PatternFill
+
+from openpyxl.utils import get_column_letter
+
+# ---------------------------------------------------------------------------
+
+# Settings you can change
+
+# ---------------------------------------------------------------------------
+
+DATA_DIR = "data"
+
+OUTPUT_DIR = "output"
+
+MATERIALITY_PCT = 0.10  # flag variances of 10% or more...
+
+MATERIALITY_USD = 3000  # ...that are also $3,000 or more
+
+
+# ---------------------------------------------------------------------------
+
+# Step 1: Load and combine the data
+
+# ---------------------------------------------------------------------------
+
+def load_data():
+
+    """Read budget.csv and actuals.csv and merge them into one table."""
+
+    budget = pd.read_csv(os.path.join(DATA_DIR, "budget.csv"))
+
+    actuals = pd.read_csv(os.path.join(DATA_DIR, "actuals.csv"))
+
+    keys = ["month", "department", "account", "account_type"]
+
+    df = budget.merge(actuals, on=keys, suffixes=("_budget", "_actual"))
+
+    df = df.rename(columns={"amount_budget": "budget", "amount_actual": "actual"})
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+
+# Step 2: Calculate variances and flag what matters
+
+# ---------------------------------------------------------------------------
+
+def add_variance_columns(df):
+
+    """Add variance $, variance %, favorable/unfavorable, and material flag."""
+
+    df = df.copy()
+
+    df["variance_usd"] = df["actual"] - df["budget"]
+
+    df["variance_pct"] = df["variance_usd"] / df["budget"]
+
+    # Finance logic: more revenue than planned is good (favorable),
+
+    # more expense than planned is bad (unfavorable).
+
+    def direction(row):
+
+        if row["account_type"] == "Revenue":
+
+            return "Favorable" if row["variance_usd"] >= 0 else "Unfavorable"
+
+        return "Favorable" if row["variance_usd"] <= 0 else "Unfavorable"
+
+    df["direction"] = df.apply(direction, axis=1)
+
+    df["material"] = (df["variance_pct"].abs() >= MATERIALITY_PCT) & (
+
+        df["variance_usd"].abs() >= MATERIALITY_USD
+
+    )
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+
+# Step 3: Build summary tables
+
+# ---------------------------------------------------------------------------
+
+def build_summaries(df):
+
+    """Create a department-level summary and a table of material flags."""
+
+    expenses = df[df["account_type"] == "Expense"]
+
+    dept_summary = (
+
+        expenses.groupby("department")[["budget", "actual", "variance_usd"]]
+
+        .sum()
+
+        .reset_index()
+
+    )
+
+    dept_summary["variance_pct"] = (
+
+        dept_summary["variance_usd"] / dept_summary["budget"]
+
+    )
+
+    flags = df[df["material"]].sort_values("variance_usd", ascending=False)
+
+    return dept_summary, flags
+
+
+# ---------------------------------------------------------------------------
+
+# Step 4: Write the formatted Excel report
+
+# ---------------------------------------------------------------------------
+
+def write_excel(df, dept_summary, flags):
+
+    """Save a three-tab Excel workbook with basic professional formatting."""
+
+    path = os.path.join(OUTPUT_DIR, "variance_report.xlsx")
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+
+        dept_summary.to_excel(writer, sheet_name="Dept Summary", index=False)
+
+        flags.to_excel(writer, sheet_name="Material Flags", index=False)
+
+        df.to_excel(writer, sheet_name="Full Detail", index=False)
+
+        header_fill = PatternFill("solid", fgColor="1F4E79")
+
+        header_font = Font(color="FFFFFF", bold=True)
+
+        red_font = Font(color="C00000")
+
+        for sheet_name in writer.sheets:
+
+            ws = writer.sheets[sheet_name]
+
+            ws.freeze_panes = "A2"
+
+            # Style the header row and size the columns.
+
+            for col_idx, cell in enumerate(ws[1], start=1):
+
+                cell.fill = header_fill
+
+                cell.font = header_font
+
+                cell.alignment = Alignment(horizontal="center")
+
+                ws.column_dimensions[get_column_letter(col_idx)].width = 16
+
+            # Format numbers: currency for $ columns, percent for % columns,
+
+            # and red font on unfavorable variance dollars.
+
+            headers = [c.value for c in ws[1]]
+
+            for row in ws.iter_rows(min_row=2):
+
+                for cell, header in zip(row, headers):
+
+                    if header in ("budget", "actual", "variance_usd"):
+
+                        cell.number_format = '#,##0;[Red](#,##0)'
+
+                    if header == "variance_pct":
+
+                        cell.number_format = "0.0%"
+
+                    if header == "variance_usd" and cell.value is not None:
+
+                        if cell.value > 0:
+
+                            cell.font = red_font  # over budget on this report
+
+    return path
+
+
+# ---------------------------------------------------------------------------
+
+# Step 5: Build the charts
+
+# ---------------------------------------------------------------------------
+
+def write_charts(df, dept_summary):
+
+    """Save a two-panel PNG: dept budget vs. actual, and monthly trend."""
+
+    path = os.path.join(OUTPUT_DIR, "variance_charts.png")
+
+    expenses = df[df["account_type"] == "Expense"]
+
+    monthly = expenses.groupby("month")[["budget", "actual"]].sum().reset_index()
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Left chart: total H1 expenses by department, budget vs. actual.
+
+    x = range(len(dept_summary))
+
+    width = 0.38
+
+    ax1.bar([i - width / 2 for i in x], dept_summary["budget"], width,
+
+            label="Budget", color="#1F4E79")
+
+    ax1.bar([i + width / 2 for i in x], dept_summary["actual"], width,
+
+            label="Actual", color="#E67E22")
+
+    ax1.set_xticks(list(x))
+
+    ax1.set_xticklabels(dept_summary["department"])
+
+    ax1.set_title("H1 2026 Operating Expenses by Department")
+
+    ax1.set_ylabel("USD")
+
+    ax1.legend()
+
+    # Right chart: monthly totals, budget vs. actual.
+
+    ax2.plot(monthly["month"], monthly["budget"], marker="o",
+
+             label="Budget", color="#1F4E79")
+
+    ax2.plot(monthly["month"], monthly["actual"], marker="o",
+
+             label="Actual", color="#E67E22")
+
+    ax2.set_title("Monthly Operating Expenses: Budget vs. Actual")
+
+    ax2.set_ylabel("USD")
+
+    ax2.tick_params(axis="x", rotation=45)
+
+    ax2.legend()
+
+    fig.tight_layout()
+
+    fig.savefig(path, dpi=150)
+
+    plt.close(fig)
+
+    return path
+
+
+# ---------------------------------------------------------------------------
+
+# Step 6: Auto-generate the executive summary
+
+# ---------------------------------------------------------------------------
+
+def write_summary(df, dept_summary, flags):
+
+    """Write a plain-English commentary file an executive could read."""
+
+    path = os.path.join(OUTPUT_DIR, "executive_summary.txt")
+
+    expenses = df[df["account_type"] == "Expense"]
+
+    total_budget = expenses["budget"].sum()
+
+    total_actual = expenses["actual"].sum()
+
+    total_var = total_actual - total_budget
+
+    total_pct = total_var / total_budget
+
+    revenue = df[df["account_type"] == "Revenue"]
+
+    rev_var = revenue["actual"].sum() - revenue["budget"].sum()
+
+    worst = (
+
+        flags[flags["direction"] == "Unfavorable"]
+
+        .assign(abs_usd=lambda d: d["variance_usd"].abs())
+
+        .sort_values("abs_usd", ascending=False)
+
+        .head(3)
+
+    )
+
+    lines = []
+
+    lines.append("EXECUTIVE SUMMARY - H1 2026 BUDGET VS. ACTUALS")
+
+    lines.append("=" * 55)
+
+    lines.append("")
+
+    lines.append(
+
+        f"Total H1 operating expenses were ${total_actual:,.0f} against a "
+
+        f"budget of ${total_budget:,.0f}, a variance of ${total_var:,.0f} "
+
+        f"({total_pct:+.1%})."
+
+    )
+
+    lines.append(
+
+        f"Revenue finished ${rev_var:,.0f} "
+
+        f"{'ahead of' if rev_var >= 0 else 'behind'} plan."
+
+    )
+
+    lines.append("")
+
+    lines.append(f"Material variance items flagged: {len(flags)} "
+
+                 f"(threshold: {MATERIALITY_PCT:.0%} and ${MATERIALITY_USD:,})")
+
+    lines.append("")
+
+    lines.append("Top unfavorable drivers:")
+
+    for _, row in worst.iterrows():
+
+        lines.append(
+
+            f"  - {row['department']} / {row['account']} ({row['month']}): "
+
+            f"${row['variance_usd']:,.0f} over budget ({row['variance_pct']:+.1%})"
+
+        )
+
+    lines.append("")
+
+    lines.append("Recommended follow-ups:")
+
+    lines.append("  - Review spend controls for the departments flagged above.")
+
+    lines.append("  - Confirm whether overruns are timing differences or true run-rate increases.")
+
+    lines.append("  - Reforecast H2 using the monthly trend in variance_charts.png.")
+
+    with open(path, "w") as f:
+
+        f.write("\n".join(lines))
+
+    return path, "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+
+# Main: run all the steps in order
+
+# ---------------------------------------------------------------------------
+
+def main():
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    df = load_data()
+
+    df = add_variance_columns(df)
+
+    dept_summary, flags = build_summaries(df)
+
+    excel_path = write_excel(df, dept_summary, flags)
+
+    chart_path = write_charts(df, dept_summary)
+
+    summary_path, summary_text = write_summary(df, dept_summary, flags)
+
+    print(f"Rows analyzed: {len(df)}")
+
+    print(f"Saved: {excel_path}")
+
+    print(f"Saved: {chart_path}")
+
+    print(f"Saved: {summary_path}")
+
+    print()
+
+    print(summary_text)
+
+
+if __name__ == "__main__":
+
+    main()
